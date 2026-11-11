@@ -1,0 +1,28 @@
+# Стадия установки зависимостей без кеша pip
+FROM python:3.11-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN python -m venv /opt/venv
+RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+# Итоговая стадия
+FROM python:3.11-slim
+LABEL maintainer="ivanovsky@lab.local"
+LABEL version="1.0"
+WORKDIR /app
+ENV PORT=5451
+COPY --from=builder /opt/venv /opt/venv
+COPY app/ ./app/
+EXPOSE ${PORT}
+
+# Установка curl для проверки здоровья
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Проверка доступности эндпоинта health
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+# Запуск приложения на персональном порту
+CMD exec /opt/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${PORT}
