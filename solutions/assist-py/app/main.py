@@ -4,8 +4,20 @@ import psycopg2
 from pydantic import BaseModel
 import os
 import httpx
+import json
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+REDIS_URL = os.getenv("REDIS_URL")
+CACHE_TTL = int(os.getenv("CACHE_TTL", "120"))
+redis_client = (
+    Redis.from_url(
+        REDIS_URL, decode_responses=True, socket_connect_timeout=2, socket_timeout=2
+    )
+    if REDIS_URL
+    else None
+)
 
 
 def connect():
@@ -23,7 +35,11 @@ async def lifespan(app: FastAPI):
                         text TEXT NOT NULL
                     )
                 """)
-    yield
+    try:
+        yield
+    finally:
+        if redis_client is not None:
+            await redis_client.aclose()
 
 
 app = FastAPI(title="Personal Assistant", lifespan=lifespan)
@@ -45,7 +61,7 @@ async def root():
         "message": f"👋 Привет, {OWNER}!",
         "service": "personal-assistant",
         "version": "1.0",
-        "endpoints": ["/me", "/notes", "/weather/{city}", "/secret/{key}"],
+        "endpoints": ["/me", "/notes", "/weather/{city}", "/cache/stats", "/secret/{key}"],
     }
 
 
@@ -99,8 +115,37 @@ WEATHER_CODES: dict[int, str] = {
 }
 
 
+@app.get("/cache/stats")
+async def cache_stats():
+    prefix = f"weather:{OWNER}:"
+    cities = []
+    if redis_client is not None:
+        try:
+            async for key in redis_client.scan_iter(match=f"{prefix}*"):
+                cities.append(key.removeprefix(prefix))
+        except RedisError as error:
+            raise HTTPException(503, "Redis is unavailable") from error
+
+    cities = sorted(set(cities))
+    return {
+        "owner": OWNER,
+        "ttl_seconds": CACHE_TTL,
+        "cached_count": len(cities),
+        "cached_cities": cities,
+    }
+
+
 @app.get("/weather/{city}")
 async def weather(city: str):
+    cache_key = f"weather:{OWNER}:{city.strip().lower()}"
+    if redis_client is not None:
+        try:
+            cached = await redis_client.get(cache_key)
+            if cached is not None:
+                return {**json.loads(cached), "source": "cache"}
+        except (RedisError, json.JSONDecodeError):
+            pass
+
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             geo_resp = await client.get(
@@ -130,7 +175,7 @@ async def weather(city: str):
 
             code = weather_data.get("weather_code", -1)
 
-            return {
+            result = {
                 "city": city_name,
                 "country": country,
                 "coordinates": {"lat": lat, "lon": lon},
@@ -138,7 +183,14 @@ async def weather(city: str):
                 "humidity_pct": weather_data["relative_humidity_2m"],
                 "wind_km_h": weather_data["wind_speed_10m"],
                 "condition": WEATHER_CODES.get(code, f"Code {code}"),
+                "source": "api",
             }
+            if redis_client is not None:
+                try:
+                    await redis_client.setex(cache_key, CACHE_TTL, json.dumps(result))
+                except RedisError:
+                    pass
+            return result
     except Exception as e:
         return {"error": f"Failed to get weather: {type(e).__name__}: {e}"}
 
