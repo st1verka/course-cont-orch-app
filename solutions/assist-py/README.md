@@ -135,3 +135,33 @@ docker run -d --name ivanovsky-assistant -p 8021:8021 \
 Я подключил каталог `config` с хоста к `/app/config` в контейнере в режиме только для чтения. Командой `docker exec` я проверил содержимое `app.conf`. После изменения `maintenance_mode` на хосте и перезапуска контейнера файл внутри контейнера содержал новое значение `true`. Образ я не пересобирал.
 
 [Скриншот проверки](../reports/lab-3/images/step-3-3.png)
+
+### Пользовательская сеть Docker
+
+Я создал сеть `ivanovsky-backend` и подключил к ней PostgreSQL и ассистента. Порт PostgreSQL не опубликован на хосте. Ассистент обращается к базе по имени контейнера `ivanovsky-postgres` и порту `5432`. Для HTTP-запросов к ассистенту на хосте опубликован порт `8021`.
+
+Команды ниже используют ранее созданный том `ivanovsky-pgdata` и переменные окружения `POSTGRES_PASSWORD` и `APP_SECRET`. Ассистент запускается после того, как `pg_isready` подтвердит готовность базы.
+
+```bash
+docker network create ivanovsky-backend
+
+docker run -d --name ivanovsky-postgres \
+  --network ivanovsky-backend \
+  -e POSTGRES_USER=user_21 -e POSTGRES_PASSWORD -e POSTGRES_DB=ivanovsky21 \
+  -v ivanovsky-pgdata:/var/lib/postgresql/data postgres:15
+
+docker exec ivanovsky-postgres \
+  pg_isready -h 127.0.0.1 -U user_21 -d ivanovsky21
+
+docker run -d --name ivanovsky-assistant \
+  --network ivanovsky-backend -p 8021:8021 \
+  -e PORT=8021 -e APP_OWNER=ivanovsky -e APP_SECRET \
+  -e DATABASE_URL="postgresql://user_21:${POSTGRES_PASSWORD}@ivanovsky-postgres:5432/ivanovsky21" \
+  -v "$PWD/config:/app/config:ro" \
+  ivanovsky-assistant:v3
+```
+
+Я проверил разрешение имени `ivanovsky-postgres` из двух контейнеров Alpine. Вне сети `ivanovsky-backend` имя не разрешилось. Внутри сети я получил два ответа на `ping` без потерь. Запрос `GET /notes` вернул заметку, созданную до переноса, и новую заметку «ЛР3: сеть работает!».
+
+- [Проверка вне сети](../reports/lab-3/images/step-4-4-outside.png)
+- [Проверка внутри сети](../reports/lab-3/images/step-4-4-inside.png)
