@@ -1,0 +1,6 @@
+services:
+  app:
+    container_name: !reset null
+    ports: !override
+      - target: ${APP_PORT}
+        host_ip: 127.0.0.1
