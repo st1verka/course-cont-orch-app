@@ -1,9 +1,32 @@
-from fastapi import FastAPI
+from contextlib import asynccontextmanager, closing
+from fastapi import FastAPI, HTTPException
+import psycopg2
 from pydantic import BaseModel
 import os
 import httpx
 
-app = FastAPI(title="Personal Assistant")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+def connect():
+    return psycopg2.connect(DATABASE_URL, connect_timeout=3)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if DATABASE_URL:
+        with closing(connect()) as connection:
+            with connection, connection.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS notes (
+                        id BIGSERIAL PRIMARY KEY,
+                        text TEXT NOT NULL
+                    )
+                """)
+    yield
+
+
+app = FastAPI(title="Personal Assistant", lifespan=lifespan)
 
 OWNER = os.getenv("APP_OWNER", "anonymous")
 SECRET_KEY = os.getenv("APP_SECRET", "default_secret")
@@ -27,8 +50,18 @@ async def root():
 
 
 @app.get("/health")
-async def health():
-    return {"status": "healthy", "owner": OWNER}
+def health():
+    if not DATABASE_URL:
+        return {"status": "healthy", "owner": OWNER}
+
+    try:
+        with closing(connect()) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except psycopg2.Error as error:
+        raise HTTPException(503, "PostgreSQL is unavailable") from error
+
+    return {"status": "healthy", "owner": OWNER, "database": "connected"}
 
 
 @app.get("/me")
@@ -111,12 +144,30 @@ async def weather(city: str):
 
 
 @app.post("/notes")
-async def create_note(note: Note):
+def create_note(note: Note):
+    if DATABASE_URL:
+        with closing(connect()) as connection:
+            with connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO notes (text) VALUES (%s) RETURNING id",
+                    (note.text,),
+                )
+                note_id = cursor.fetchone()[0] - 1
+                cursor.execute("SELECT COUNT(*) FROM notes")
+                total = cursor.fetchone()[0]
+        return {"status": "saved", "note_id": note_id, "total": total}
+
     notes.append(note.text)
     return {"status": "saved", "note_id": len(notes) - 1, "total": len(notes)}
 
 
 @app.get("/notes")
-async def list_notes():
+def list_notes():
+    if DATABASE_URL:
+        with closing(connect()) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT text FROM notes ORDER BY id")
+            saved_notes = [row[0] for row in cursor.fetchall()]
+        return {"notes": saved_notes, "count": len(saved_notes)}
+
     return {"notes": notes, "count": len(notes)}
 

@@ -97,3 +97,30 @@ Healthcheck проверяет /health каждые 30 секунд.
     docker tag ivanovsky-assistant:final ivanovsky-assistant:$(date +%Y%m%d)
 
 Теги final, 1.0.0 и дата сборки ссылаются на один итоговый образ.
+
+## Хранение данных
+
+В лабораторной работе № 3 я подключил PostgreSQL к приложению на FastAPI. При заданной переменной `DATABASE_URL` приложение сохраняет заметки в базе данных, а эндпоинт `/health` проверяет доступность PostgreSQL.
+
+Для хранения файлов базы данных я создал именованный том `ivanovsky-pgdata` и подключил его к каталогу `/var/lib/postgresql/data` внутри контейнера. На первом этапе я опубликовал порт PostgreSQL на хосте как `5451`. Ассистент обращается к базе `ivanovsky21` по адресу `host.docker.internal:5451` и принимает HTTP-запросы на порту `8021`.
+
+Перед запуском необходимо задать и экспортировать переменные `POSTGRES_PASSWORD` и `APP_SECRET`. Команды выполняются из каталога `solutions/assist-py`.
+
+```bash
+docker volume create ivanovsky-pgdata
+
+docker run -d --name ivanovsky-postgres \
+  -e POSTGRES_USER=user_21 -e POSTGRES_PASSWORD -e POSTGRES_DB=ivanovsky21 \
+  -v ivanovsky-pgdata:/var/lib/postgresql/data -p 5451:5432 postgres:15
+
+docker build -f Dockerfile.optimized -t ivanovsky-assistant:v3 .
+
+docker run -d --name ivanovsky-assistant -p 8021:8021 \
+  -e PORT=8021 -e APP_OWNER=ivanovsky -e APP_SECRET \
+  -e DATABASE_URL="postgresql://user_21:${POSTGRES_PASSWORD}@host.docker.internal:5451/ivanovsky21" \
+  ivanovsky-assistant:v3
+```
+
+Для проверки я отправил четыре HTTP-запроса. Главная страница вернула приветствие, а `/health` подтвердил подключение к PostgreSQL. Затем я создал заметку «ЛР3: данные в БД» запросом `POST /notes` и проверил её наличие в ответе `GET /notes`.
+
+[Скриншот проверки](../reports/lab-3/images/step-1-5.png)
