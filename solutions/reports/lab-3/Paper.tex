@@ -1,0 +1,93 @@
+\reportelement{Введение}
+Цель работы --- подключить PostgreSQL к персональному ассистенту на FastAPI, организовать хранение заметок в именованном томе и проверить взаимодействие контейнеров в пользовательской сети Docker. Я продолжил работу с ветки ЛР № 2 и создал ветку \texttt{lab-3}. Проверки выполнены в Docker Desktop на macOS.
+
+\begin{table}[H]
+\caption{Персональные параметры лабораторной работы}
+\begin{tabularx}{\textwidth}{|p{61mm}|X|}
+\hline
+Параметр & Значение \\\hline
+ФИО & Ивановский Роман Евгеньевич \\\hline
+Группа & К3320 \\\hline
+Номер ИСУ & 466021 \\\hline
+Порт PostgreSQL на хосте & 5430 + 21 = 5451 \\\hline
+Порт ассистента на хосте & 8000 + 21 = 8021 \\\hline
+Префикс & ivanovsky \\\hline
+Учебный ключ ассистента & secret21ivanovsky \\\hline
+Имя базы данных & ivanovsky21 \\\hline
+\end{tabularx}
+\end{table}
+
+На первом этапе я использовал порт \texttt{5451} для доступа к PostgreSQL через хост. После переноса в пользовательскую сеть PostgreSQL принимал соединения на внутреннем порту \texttt{5432}. Ассистент на всех этапах был доступен на порту \texttt{8021}. Учебный ключ я передавал в контейнер через переменную \texttt{APP\_SECRET}.
+
+\chapter{Именованный том и подключение PostgreSQL}
+Я создал том \texttt{ivanovsky-pgdata} и подключил его к каталогу \texttt{/var/lib/postgresql/data} контейнера PostgreSQL 15. Для связи с ассистентом на первом этапе я опубликовал порт базы \texttt{5451} и указал адрес \texttt{host.docker.internal:5451} в переменной \texttt{DATABASE\_URL}.
+
+\begin{code}
+docker volume create ivanovsky-pgdata
+docker build -f Dockerfile.optimized -t ivanovsky-assistant:v3 .
+\end{code}
+
+При запуске FastAPI создаёт таблицу \texttt{notes}, если она ещё отсутствует. Эндпоинты \texttt{POST /notes} и \texttt{GET /notes} записывают и читают данные через PostgreSQL. В обработчике \texttt{/health} я добавил запрос \texttt{SELECT 1}.
+
+На macOS порт \texttt{8021} был занят службой \texttt{com.apple.ftp-proxy}. После временной выгрузки службы я запустил ассистента на персональном порту. Запросы к \texttt{/} и \texttt{/health} завершились успешно. Я создал заметку «ЛР3: данные в БД» и получил её запросом \texttt{GET /notes}.
+
+\reportscreenshot{images/step-1-5.png}{Проверка HTTP-запросами и сохранение первой заметки}{fig:stage-1}
+
+\chapter{Проверка сохранности заметки}
+Я остановил и удалил контейнер ассистента, затем создал новый контейнер из того же образа. PostgreSQL и именованный том продолжали работать. После запуска нового контейнера я запросил список заметок.
+
+\begin{code}
+docker stop ivanovsky-assistant
+docker rm ivanovsky-assistant
+curl -4 -fsS http://localhost:8021/notes |
+  python3 -m json.tool --no-ensure-ascii
+\end{code}
+
+В ответе сохранилась заметка «ЛР3: данные в БД», созданная до пересоздания ассистента. На контрольном снимке также видны время проверки, логин и имя хоста.
+
+\reportscreenshot{images/step-2-4.png}{Получение исходной заметки после пересоздания ассистента}{fig:stage-2}
+
+\chapter{Подключение файла конфигурации}
+Я создал файл \texttt{config/app.conf} с параметрами ассистента и значением \texttt{owner=ivanovsky}. При запуске контейнера каталог \texttt{config} с хоста я подключил к \texttt{/app/config} в режиме только для чтения с параметром \texttt{-v "\$PWD/config:/app/config:ro"}.
+
+\begin{code}
+docker exec ivanovsky-assistant-config cat /app/config/app.conf
+docker restart ivanovsky-assistant-config
+docker exec ivanovsky-assistant-config cat /app/config/app.conf
+\end{code}
+
+Между двумя проверками я изменил на хосте значение \texttt{maintenance\_mode} с \texttt{false} на \texttt{true}. После перезапуска новое значение отобразилось внутри контейнера без пересборки образа. Проверка подтверждает доступ контейнера к обновлённому файлу.
+
+\reportscreenshot{images/step-3-3.png}{Файл конфигурации внутри контейнера до и после изменения на хосте}{fig:stage-3}
+
+\chapter{Пользовательская сеть и изоляция базы}
+Я создал сеть \texttt{ivanovsky-backend} и пересоздал в ней PostgreSQL и ассистента. Для PostgreSQL я сохранил том \texttt{ivanovsky-pgdata} и убрал публикацию порта на хосте. Ассистент подключался к базе по адресу \texttt{ivanovsky-postgres:5432} внутри сети.
+
+После переноса \texttt{/health} подтвердил подключение к PostgreSQL. Я создал заметку «ЛР3: сеть работает!» и получил обе заметки запросом \texttt{GET /notes}.
+
+В стандартной сети контейнер Alpine получил ошибку разрешения имени \texttt{ivanovsky-postgres}. В сети \texttt{ivanovsky-backend} имя разрешилось, и \texttt{ping} получил два ответа без потерь.
+
+\reportscreenshot{images/step-4-4-outside.png}{Ошибка разрешения имени вне сети ivanovsky-backend}{fig:stage-4}
+
+\reportscreenshot{images/step-4-4-inside.png}{Проверка доступности контейнера внутри сети ivanovsky-backend}{fig:stage-5}
+
+\chapter{Итоговая проверка инфраструктуры}
+В финальном выводе от 24.11.2026 я проверил состояние обоих контейнеров, именованного тома и пользовательской сети. Ассистент имел статус \texttt{healthy} и проброс порта \texttt{8021}. В строке PostgreSQL отображался только внутренний порт \texttt{5432/tcp}.
+
+\begin{code}
+docker ps --filter 'name=ivanovsky-'
+docker volume ls --filter 'name=ivanovsky-pgdata'
+docker network ls --filter 'name=ivanovsky-backend'
+\end{code}
+
+\reportscreenshot{images/step-5-1.png}{Итоговое состояние контейнеров, тома и сети}{fig:stage-6}
+
+Репозиторий работы, ветка lab-3.\ \url{https://github.com/st1verka/course-cont-orch-app/tree/lab-3}
+
+\reportelement{Заключение}
+Я подключил PostgreSQL к ассистенту на FastAPI и проверил, что заметка сохраняется после пересоздания контейнера приложения. Подключённый через bind mount конфигурационный файл обновился внутри контейнера после изменения на хосте. В итоговой схеме ассистент подключается к базе по имени контейнера в пользовательской сети, а на хосте опубликован только порт ассистента.
+
+\begin{thebibliography}{9}
+\bibitem{source1} Курс «Контейнеризация и оркестрация приложений». Задание лабораторной работы № 3.\ \url{https://github.com/itmo-faculty-applied-informatics/course-cont-orch-app/blob/main/labs/03-persistence.md}
+\bibitem{source2} Репозиторий с результатами лабораторной работы, ветка lab-3.\ \url{https://github.com/st1verka/course-cont-orch-app/tree/lab-3}
+\end{thebibliography}
