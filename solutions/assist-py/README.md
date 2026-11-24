@@ -165,3 +165,37 @@ docker run -d --name ivanovsky-assistant \
 
 - [Проверка вне сети](../reports/lab-3/images/step-4-4-outside.png)
 - [Проверка внутри сети](../reports/lab-3/images/step-4-4-inside.png)
+
+## Docker Compose
+
+В ЛР №4 я объединил ассистента FastAPI, PostgreSQL и Redis в один стек. Ассистент запускается после успешных проверок готовности PostgreSQL и Redis. PostgreSQL хранит заметки в томе `ivanovsky-pgdata`. Redis кэширует ответы о погоде на 120 секунд, а эндпоинт `/cache/stats` показывает список городов в кэше. Все сервисы подключены к сети `ivanovsky-backend`.
+
+На хосте используются порты `8021` для FastAPI, `5451` для PostgreSQL и `6391` для Redis. Порты опубликованы на `127.0.0.1`.
+
+Перед первым запуском нужно создать `.env` по образцу `.env.example`, указать учебный ключ и пароль PostgreSQL, а также подготовить внешний том и сеть.
+
+```bash
+cp -n .env.example .env
+docker volume create ivanovsky-pgdata
+docker network inspect ivanovsky-backend >/dev/null 2>&1 ||
+  docker network create ivanovsky-backend
+```
+
+После заполнения `.env` стек запускается командой `docker compose up -d --build`.
+
+Для запуска трёх реплик я использовал `docker-compose.scale.yml`. Docker назначает каждой реплике отдельный порт на хосте. Все три реплики используют общий Redis-кэш.
+
+```bash
+docker compose down &&
+docker compose -f docker-compose.yml -f docker-compose.scale.yml \
+  up -d --build --wait --scale app=3
+
+docker compose -f docker-compose.yml -f docker-compose.scale.yml ps
+```
+
+Возврат к одному экземпляру на порту `8021`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.scale.yml down &&
+docker compose up -d --wait
+```

@@ -1,0 +1,196 @@
+\reportelement{Введение}
+Цель работы --- объединить FastAPI, PostgreSQL и Redis в проект Docker Compose, настроить запуск по проверкам готовности, проверить кэширование запросов к погодному API и масштабировать приложение до трёх экземпляров. Работу я выполнил в Docker Desktop на macOS в ветке \texttt{lab-4}, созданной от \texttt{lab-3}.
+
+\begin{table}[H]
+\caption{Персональные параметры лабораторной работы}
+\begin{tabularx}{\textwidth}{|p{61mm}|X|}
+\hline
+Параметр & Значение \\\hline
+ФИО & Ивановский Роман Евгеньевич \\\hline
+Группа & К3320 \\\hline
+Номер ИСУ & 466021 \\\hline
+Порт PostgreSQL на хосте & 5430 + 21 = 5451 \\\hline
+Порт ассистента на хосте & 8000 + 21 = 8021 \\\hline
+Порт Redis на хосте & 6370 + 21 = 6391 \\\hline
+Префикс & ivanovsky \\\hline
+Учебный ключ ассистента & secret21ivanovsky \\\hline
+Имя базы данных & ivanovsky21 \\\hline
+\end{tabularx}
+\end{table}
+
+Порты FastAPI, PostgreSQL и Redis опубликованы на \texttt{127.0.0.1}. В сети Docker приложение обращается к PostgreSQL по адресу \texttt{db:5432}, а к Redis --- по адресу \texttt{redis:6379}. Учебный ключ и пароль PostgreSQL передаются через локальный файл \texttt{.env}, который исключён из Git.
+
+\chapter{Запуск FastAPI и PostgreSQL в Compose}
+Сначала я описал два сервиса в \texttt{docker-compose.yml}. Сервис \texttt{db} использует образ PostgreSQL 15 и именованный том \texttt{ivanovsky-pgdata} из ЛР № 3. Сервис \texttt{app} собирается из \texttt{Dockerfile.optimized}. Оба контейнера подключаются к существующей сети \texttt{ivanovsky-backend}.
+
+Я указал параметры через \texttt{.env} и добавил в репозиторий \texttt{.env.example} с заглушками. Зависимость \texttt{depends\_on} с условием \texttt{service\_healthy} разрешает запуск FastAPI после успешной проверки PostgreSQL командой \texttt{pg\_isready}.
+
+\begin{code}
+docker compose up -d --build
+docker compose ps
+curl -4 -fsS http://localhost:8021/
+curl -4 -fsS http://localhost:8021/health
+\end{code}
+
+Оба контейнера имели статус \texttt{healthy}. Запрос к корневому эндпоинту вернул приветствие для \texttt{ivanovsky}, а \texttt{/health} подтвердил подключение к PostgreSQL.
+
+\reportscreenshot{images/step-1-3.png}{Базовый запуск FastAPI и PostgreSQL и проверка HTTP-запросами}{fig:stage-1}
+
+\chapter{Redis и кэширование прогноза погоды}
+Я добавил сервис \texttt{redis} на базе образа \texttt{redis:7-alpine}. Проверка готовности выполняется командой \texttt{redis-cli ping}. FastAPI ожидает готовности обоих зависимых сервисов и использует адрес Redis из переменной \texttt{REDIS\_URL}.
+
+В обработчике \texttt{/weather/\{city\}} я привожу имя города к нижнему регистру и формирую ключ \texttt{weather:ivanovsky:\textless{}город\textgreater{}}. При наличии записи обработчик возвращает данные из Redis с полем \texttt{source: cache}. При отсутствии записи он запрашивает прогноз в Open-Meteo, сохраняет успешный ответ на 120 секунд и возвращает \texttt{source: api}.
+
+Эндпоинт \texttt{/cache/stats} использует обход ключей через \texttt{SCAN} и показывает владельца, настроенный TTL, число записей и список городов. Redis работает как общий кэш прогнозов. Заметки по-прежнему сохраняются в PostgreSQL.
+
+\begin{code}
+docker compose exec -T redis redis-cli ping
+curl -4 -fsS http://localhost:8021/cache/stats
+\end{code}
+
+\chapter{Проверка полного стека}
+После перезапуска все три сервиса получили статус \texttt{healthy}. В журналах Redis и PostgreSQL сообщили о готовности в 15:44:56 UTC, а FastAPI завершил запуск в 15:45:02 UTC.
+
+\reportscreenshot{images/step-3-2.png}{Состояние контейнеров и порядок запуска по журналам}{fig:stage-2}
+
+Два запроса для Москвы вернули источники \texttt{api} и \texttt{cache}. В статистике появилась запись \texttt{moscow}, а Redis показал оставшееся время жизни ключа 120 секунд.
+
+\reportscreenshot{images/step-3-3.png}{Повторный запрос погоды для Москвы и статистика кэша}{fig:stage-3}
+
+Команда \texttt{docker network inspect} подтвердила, что все три контейнера подключены к сети \texttt{ivanovsky-backend}.
+
+\reportscreenshot{images/step-3-4.png}{Подключение FastAPI, PostgreSQL и Redis к общей сети}{fig:stage-4}
+
+\chapter{Масштабирование FastAPI}
+Для трёх экземпляров я подключил \texttt{docker-compose.scale.yml}. Он убирает фиксированное имя контейнера FastAPI и фиксированный порт на хосте. Порт FastAPI внутри контейнера остаётся равным 8021.
+
+\begin{code}
+docker compose -f docker-compose.yml -f docker-compose.scale.yml \
+  up -d --build --wait --scale app=3
+\end{code}
+
+\reportscreenshot{images/step-4-2.png}{Три экземпляра FastAPI с портами 61880, 61874 и 61877}{fig:stage-5}
+
+Каждый экземпляр вернул успешный ответ на \texttt{/health}. Первая реплика получила прогноз для Лондона из API, а вторая и третья прочитали ту же запись из общего Redis. В статистике отобразился ключ для города \texttt{london}.
+
+\reportscreenshot{images/step-4-3.png}{Проверка доступности трёх реплик и общего кэша для Лондона}{fig:stage-6}
+
+\chapter{Итоговая проверка инфраструктуры}
+После проверки масштабирования я вернулся к одному экземпляру FastAPI на порту 8021 и запросил прогноз для Лондона, чтобы заполнить кэш. В финальном выводе от 24.11.2026 видны три сервиса со статусом \texttt{healthy}, том \texttt{ivanovsky-pgdata} и сеть \texttt{ivanovsky-backend}.
+
+В Redis отобразился ключ \texttt{weather:ivanovsky:london}. Эндпоинт \texttt{/cache/stats} вернул владельца \texttt{ivanovsky}, TTL 120 секунд и город \texttt{london}. На снимке также указаны время, логин и имя хоста.
+
+\reportscreenshot{images/step-5-1.png}{Финальная проверка сервисов, сети, тома и Redis-кэша}{fig:stage-7}
+
+Репозиторий работы, ветка lab-4.\ \url{https://github.com/st1verka/course-cont-orch-app/tree/lab-4}
+
+\reportelement{Заключение}
+Я настроил запуск FastAPI, PostgreSQL и Redis через Docker Compose. Проверки показали, что приложение запускается после готовности зависимостей, а повторный запрос погоды обслуживается из Redis. Три реплики приложения успешно подключились к PostgreSQL и прочитали общую запись кэша. После проверки я восстановил обычный запуск с одним экземпляром.
+
+\reportelement{Приложение А. docker-compose.yml}
+Первая часть конфигурации содержит настройки PostgreSQL и Redis.
+
+\begin{code}
+name: ivanovsky-lab4
+
+services:
+  db:
+    image: postgres:15
+    container_name: ivanovsky-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:${PG_PORT}:5432"
+    volumes:
+      - ivanovsky-pgdata:/var/lib/postgresql/data
+    networks:
+      - ivanovsky-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ivanovsky-redis
+    ports:
+      - "127.0.0.1:${REDIS_PORT}:6379"
+    networks:
+      - ivanovsky-backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+\end{code}
+
+\reportelement{Приложение А. docker-compose.yml, продолжение}
+Вторая часть содержит настройки FastAPI, именованного тома и сети.
+
+\begin{code}
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
+    container_name: ivanovsky-assistant
+    environment:
+      PORT: ${APP_PORT}
+      APP_OWNER: ${APP_OWNER}
+      APP_SECRET: ${APP_SECRET}
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL: ${CACHE_TTL}
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
+    ports:
+      - "127.0.0.1:${APP_PORT}:${APP_PORT}"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ivanovsky-backend
+
+volumes:
+  ivanovsky-pgdata:
+    external: true
+
+networks:
+  ivanovsky-backend:
+    external: true
+\end{code}
+
+\reportelement{Приложение Б. Переменные и масштабирование}
+Файл \texttt{.env.example} с параметрами запуска и заглушками для ключа и пароля.
+
+\begin{code}
+APP_OWNER=ivanovsky
+APP_SECRET=CHANGE_ME
+APP_PORT=8021
+POSTGRES_USER=user_21
+POSTGRES_PASSWORD=CHANGE_ME
+POSTGRES_DB=ivanovsky21
+PG_PORT=5451
+REDIS_PORT=6391
+CACHE_TTL=120
+\end{code}
+
+Файл \texttt{docker-compose.scale.yml} для запуска нескольких реплик.
+
+\begin{code}
+services:
+  app:
+    container_name: !reset null
+    ports: !override
+      - target: ${APP_PORT}
+        host_ip: 127.0.0.1
+\end{code}
+
+\begin{thebibliography}{9}
+\bibitem{source1} Курс «Контейнеризация и оркестрация приложений». Задание лабораторной работы № 4.\ \url{https://github.com/itmo-faculty-applied-informatics/course-cont-orch-app/blob/main/labs/04-compose.md}
+\bibitem{source2} Репозиторий с результатами лабораторной работы, ветка lab-4.\ \url{https://github.com/st1verka/course-cont-orch-app/tree/lab-4}
+\end{thebibliography}
